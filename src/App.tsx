@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { UploadCloud, Loader2, Sparkles, AlertCircle, ArrowRight, RefreshCw } from 'lucide-react';
+import { UploadCloud, Loader2, Sparkles, ArrowRight, RefreshCw } from 'lucide-react';
 import { analyzeImage, calculateExchangePlan, type ParsedItem, type ExchangeStep } from './analyzer';
 import './index.css';
 
