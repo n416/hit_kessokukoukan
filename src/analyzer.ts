@@ -1,8 +1,22 @@
 import Tesseract from "tesseract.js";
 
+export interface BBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
 export interface ParsedItem {
   name: string;
   count: number;
+  bbox?: BBox;
+}
+
+export interface AnalyzeResult {
+  items: ParsedItem[];
+  debugUrl?: string;
+  extractedUrls?: string[];
 }
 
 export interface ExchangeStep {
@@ -22,142 +36,189 @@ const EXPECTED_ITEMS = [
   "虹色のキューブ(キャラ帰属)"
 ];
 
-/**
- * 結束の証明画面から、8つのアイテム領域の正確な比率を計算して個別にクロップする
- */
-async function preprocessImages(file: File): Promise<string[]> {
+export interface CalibrationData {
+  startX1: number; // 左ブロック開始X（左外）
+  startX2: number; // 右ブロック開始X（右内）
+  startY: number;
+  stepX: number;
+  stepY: number;
+  cropW: number;
+  cropH: number;
+}
+
+// ユーザー環境: 中央に大きな盾があるため、等間隔の4列ではない。
+// 左ブロック(col=0, 1) と 右ブロック(col=2, 3) に分かれている。
+const GRID_MAPPING = [
+  { col: 0, row: 0, targetIndex: 0 }, // 左上外: 赤
+  { col: 1, row: 0, targetIndex: 2 }, // 左上内: 黄
+  { col: 0, row: 1, targetIndex: 1 }, // 左下外: 橙
+  { col: 1, row: 1, targetIndex: 3 }, // 左下内: 緑
+  { col: 2, row: 0, targetIndex: 4 }, // 右上内: 青
+  { col: 3, row: 0, targetIndex: 6 }, // 右上外: 銀
+  { col: 2, row: 1, targetIndex: 5 }, // 右下内: 紫
+  { col: 3, row: 1, targetIndex: 7 }  // 右下外: 虹
+];
+
+export async function extractNumberAreasWithCalibration(file: File, calib: CalibrationData): Promise<{ urls: string[], debugUrl: string, orderedTargets: typeof GRID_MAPPING }> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
     img.onload = () => {
       URL.revokeObjectURL(url);
-
+      
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return reject(new Error('Canvas ctx not found'));
 
-      const results: string[] = [];
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
 
-      const positions = [
-        [0.13, 0.34], // 1. 赤 (左端 上)
-        [0.13, 0.47], // 2. 橙 (左端 下)
-        [0.26, 0.34], // 3. 黄 (左中央 上)
-        [0.26, 0.47], // 4. 緑 (左中央 下)
-        [0.74, 0.34], // 5. 青 (右中央 上)
-        [0.74, 0.47], // 6. 紫 (右中央 下)
-        [0.86, 0.34], // 7. 銀 (右端 上)
-        [0.86, 0.47]  // 8. 虹 (右端 下)
-      ];
+      const debugCanvas = document.createElement('canvas');
+      debugCanvas.width = canvas.width;
+      debugCanvas.height = canvas.height;
+      const dCtx = debugCanvas.getContext('2d')!;
+      dCtx.drawImage(canvas, 0, 0);
+      // 背景を暗くして、切り抜き部分を目立たせる
+      dCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      dCtx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      dCtx.strokeStyle = 'red';
+      dCtx.lineWidth = 4;
 
-      // 8分割用に戻す。高さは半分に
-      const cropW = img.width * 0.12;
-      const cropH = img.height * 0.14;
+      const resultUrls: string[] = [];
 
-      // 高解像度環境対応: クロップ後の幅が小さい場合のみ拡大
-      const scale = cropW < 250 ? 2.5 : 1.5;
+      for (const grid of GRID_MAPPING) {
+        // 左グループ（col: 0, 1）か右グループ（col: 2, 3）かで基準Xを切り替える
+        const baseX = grid.col < 2 ? calib.startX1 : calib.startX2;
+        // グループ内でのインデックス（0 または 1）
+        const subCol = grid.col % 2;
+        
+        const startX = Math.max(0, baseX + calib.stepX * subCol);
+        const startY = Math.max(0, calib.startY + calib.stepY * grid.row);
 
-      for (let i = 0; i < 8; i++) {
-        const [cx, cy] = positions[i];
-        const startX = Math.max(0, img.width * cx - cropW / 2);
-        const startY = Math.max(0, img.height * cy - cropH / 2);
+        const cropCanvas = document.createElement('canvas');
+        const scale = 3.0;
+        cropCanvas.width = calib.cropW * scale;
+        cropCanvas.height = calib.cropH * scale;
+        const cCtx = cropCanvas.getContext('2d')!;
+        
+        // 拡大時に画像がぼやけて文字の色が薄まるのを防ぐ
+        cCtx.imageSmoothingEnabled = false;
+        
+        cCtx.fillStyle = 'white';
+        cCtx.fillRect(0, 0, cropCanvas.width, cropCanvas.height);
+        cCtx.drawImage(canvas, startX, startY, calib.cropW, calib.cropH, 0, 0, cropCanvas.width, cropCanvas.height);
 
-        canvas.width = cropW * scale;
-        canvas.height = cropH * scale;
-
-        ctx.fillStyle = "white"; // 背景を白で初期化
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        ctx.drawImage(img, startX, startY, cropW, cropH, 0, 0, canvas.width, canvas.height);
-
-        // 白黒反転（明るい文字を黒、暗い背景を白に）
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const data = imageData.data;
-        for (let j = 0; j < data.length; j += 4) {
-          const r = data[j];
-          const g = data[j + 1];
-          const b = data[j + 2];
-          const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+        const cropData = cCtx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
+        for (let j = 0; j < cropData.data.length; j += 4) {
+          const r = cropData.data[j];
+          const g = cropData.data[j+1];
+          const b = cropData.data[j+2];
           
-          // 赤い文字（所持数0などの警告色）は輝度(gray)が低く背景の暗さと同化して飛んでしまう。
-          // そのため、R成分が他の成分より突出して高い場合は「赤文字」として特別に救済する。
-          const isRed = (r - g > 40) && (r - b > 40) && r > 100;
+          const maxColor = Math.max(r, g, b);
+          const minColor = Math.min(r, g, b);
           
-          // 緑や白の文字は輝度が高い(gray>90)ので拾う。赤文字はisRedで拾う。
-          const v = (gray > 90 || isRed) ? 0 : 255;
-          data[j] = v;
-          data[j + 1] = v;
-          data[j + 2] = v;
+          // 白っぽい文字（グレーでも残すように閾値を下げる）
+          const isWhiteText = r > 100 && g > 100 && b > 100 && (maxColor - minColor < 50);
+          // 赤文字
+          const isRedText = r > 100 && g < 80 && b < 80;
+          
+          if (isWhiteText || isRedText) {
+            // 文字を黒(0)にする
+            cropData.data[j] = 0;
+            cropData.data[j+1] = 0;
+            cropData.data[j+2] = 0;
+          } else {
+            // 背景やノイズを白(255)にする
+            cropData.data[j] = 255;
+            cropData.data[j+1] = 255;
+            cropData.data[j+2] = 255;
+          }
         }
-        ctx.putImageData(imageData, 0, 0);
+        cCtx.putImageData(cropData, 0, 0);
 
-        results.push(canvas.toDataURL('image/png'));
+        // デバッグキャンバスに、白黒反転した画像を実寸で描き戻す
+        dCtx.drawImage(cropCanvas, 0, 0, cropCanvas.width, cropCanvas.height, startX, startY, calib.cropW, calib.cropH);
+        
+        // AIが読み取る枠をそのまま描画
+        dCtx.strokeStyle = 'red';
+        dCtx.strokeRect(startX, startY, calib.cropW, calib.cropH);
+
+        resultUrls.push(cropCanvas.toDataURL('image/png'));
       }
 
-      resolve(results);
+      resolve({ urls: resultUrls, debugUrl: debugCanvas.toDataURL('image/png'), orderedTargets: GRID_MAPPING });
     };
     img.onerror = () => reject(new Error('画像の読み込みに失敗しました'));
     img.src = url;
   });
 }
 
-/**
- * 8枚の画像それぞれに対して個別にOCRを実行し、個数を抽出する
- */
-export async function analyzeImage(
-  imageFile: File,
-  onProgress: (msg: string) => void,
-  onDebugImages?: (urls: string[]) => void
-): Promise<ParsedItem[]> {
-  onProgress("画像を8つのアイテム領域に分割しています...");
-  let imageList: string[] = [];
-  try {
-    imageList = await preprocessImages(imageFile);
-    if (onDebugImages) onDebugImages(imageList);
-  } catch (e) {
-    console.error("画像分割に失敗", e);
-    throw e;
-  }
+export async function analyzeImageAuto(
+  file: File, 
+  calib: CalibrationData,
+  onProgress?: (msg: string) => void
+): Promise<AnalyzeResult> {
+  onProgress?.('指定された座標で画像をクロップしています...');
+  const { urls, debugUrl, orderedTargets } = await extractNumberAreasWithCalibration(file, calib);
 
-  onProgress("OCRエンジンを準備しています...");
-  const worker = await Tesseract.createWorker("jpn", 1, {
+  onProgress?.('OCRワーカーを初期化中...');
+  const worker = await Tesseract.createWorker("eng", 1, {
     logger: m => {
       if (m.status === "recognizing text") {
-        onProgress(`OCR実行中... ${Math.round(m.progress * 100)}%`);
+        onProgress?.(`OCR解析中... ${Math.round(m.progress * 100)}%`);
       }
     }
   });
 
-  const parsedItems: ParsedItem[] = [];
+  await worker.setParameters({
+    tessedit_char_whitelist: '0123456789/',
+  });
 
-  for (let i = 0; i < imageList.length; i++) {
-    onProgress(`${EXPECTED_ITEMS[i]} を読み取っています... (${i + 1}/8)`);
-    const tesseractResult = await worker.recognize(imageList[i]);
-    const text = tesseractResult.data.text;
-    console.log(`OCR Result ${i + 1}:`, text);
+  const parsedItems: ParsedItem[] = EXPECTED_ITEMS.map(name => ({ name, count: 0 }));
 
-    // "32/1" などの文字列から最初の数字（所持数）を抽出
-    const match = text.match(/(\d+)\s*\/\s*[1I]/);
+  for (let i = 0; i < urls.length; i++) {
+    const targetIndex = orderedTargets[i].targetIndex;
+    const targetName = EXPECTED_ITEMS[targetIndex];
+    
+    onProgress?.(`${targetName} の数字を解析中... (${i+1}/8)`);
+    const { data } = await worker.recognize(urls[i]);
+    
+    // 空白や改行で単語ごとに分割
+    const chunks = data.text.trim().split(/\s+/);
+    
+    // ユーザー様の「最後は必ず/1」という仕様と、Tesseractの「改行で区切る」性質を利用し、
+    // 画像内の日本語が化けた巨大なノイズ（上の行）を無視して、一番最後のチャンク（一番下の行）だけを採用します。
+    let reliableText = "";
+    if (chunks.length > 0) {
+       reliableText = chunks[chunks.length - 1];
+    } else {
+       reliableText = data.text.replace(/\s/g, '');
+    }
+    
+    console.log(`OCR ${i+1} (${targetName}): ${reliableText}`);
+
     let count = 0;
+    
+    // 信頼できる文字だけが抽出された状態なら、ノイズの「7」は分離されているはず。
+    const match = reliableText.match(/(\d+)[\/\]]*[1IlI]?$/);
+    
     if (match) {
       count = parseInt(match[1], 10);
     } else {
-      // もし赤い文字が飛んだり認識に失敗して「/1」だけが残った場合、所持数0とする安全策
-      if (text.match(/\/\s*[1I]/)) {
-        count = 0;
-      } else {
-        const fallbackMatch = text.match(/\d+/);
-        count = fallbackMatch ? parseInt(fallbackMatch[0], 10) : 0;
+      const fallback = reliableText.match(/(\d+)/);
+      if (fallback) {
+        count = parseInt(fallback[1], 10);
       }
     }
 
-    parsedItems.push({
-      name: EXPECTED_ITEMS[i],
-      count
-    });
+    parsedItems[targetIndex].count = count;
   }
 
   await worker.terminate();
-  return parsedItems;
+  onProgress?.(`解析完了`);
+  return { items: parsedItems, debugUrl };
 }
 
 export function calculateExchangePlan(items: ParsedItem[]): ExchangeStep[] {
