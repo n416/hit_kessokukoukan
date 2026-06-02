@@ -1,8 +1,46 @@
 import React, { useState, useCallback, useRef } from 'react';
-import { UploadCloud, Loader2, Sparkles, ArrowRight, RefreshCw, Settings } from 'lucide-react';
+import { UploadCloud, Loader2, Sparkles, ArrowRight, RefreshCw, Settings, Download, Upload, X } from 'lucide-react';
 import ReactCrop, { type Crop, type PixelCrop } from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import { analyzeImageAuto, calculateExchangePlan, type ParsedItem, type ExchangeStep, type CalibrationData } from './analyzer';
+
+const DEVICE_PRESETS: Record<string, CalibrationData> = {
+  'PC': {
+    startX1: 139.61668701171874,
+    startX2: 1244.15,
+    startY: 368.9,
+    stepX: 234.66662597656256,
+    stepY: 136.666748046875,
+    cropW: 210,
+    cropH: 51.3333740234375
+  },
+  'iPad': {
+    startX1: 78.79999999999995,
+    startX2: 1046.933251953125,
+    startY: 353.59999999999997,
+    stepX: 240.66656494140625,
+    stepY: 144,
+    cropW: 223.99993896484375,
+    cropH: 65.33331298828125
+  },
+  'iPhone15': {
+    startX1: 194.2,
+    startX2: 1122.7333129882813,
+    startY: 219.86668701171874,
+    stepX: 220.66662597656256,
+    stepY: 126.00006103515625,
+    cropW: 207.33331298828125,
+    cropH: 52.66668701171875
+  },
+};
+
+function guessDevice(width: number, height: number): string | null {
+  const aspect = width / height;
+  if (aspect > 2.0) return 'iPhone15'; // 例: 2556/1179 = 2.16
+  if (aspect > 1.6 && aspect < 1.9) return 'PC'; // 例: 1920/1080 = 1.77
+  if (aspect > 1.3 && aspect <= 1.5) return 'iPad'; // 例: 2388/1668 = 1.43
+  return null;
+}
 
 function App() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -12,6 +50,11 @@ function App() {
   const [parsedItems, setParsedItems] = useState<ParsedItem[]>([]);
   const [exchangePlan, setExchangePlan] = useState<ExchangeStep[]>([]);
   const [debugUrl, setDebugUrl] = useState<string | null>(null);
+
+  const [deviceConfirm, setDeviceConfirm] = useState<{ file: File, deviceName: string, calibPreset: CalibrationData } | null>(null);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [importText, setImportText] = useState('');
 
   // ウィザード状態: 0=完了, 1=赤(左上外), 2=黄(左上内), 3=青(右上内), 4=橙(左下外)
   const [calibration, setCalibration] = useState<CalibrationData | null>(() => {
@@ -107,6 +150,13 @@ function App() {
     };
   }, [onPanMove, onPanEnd]);
 
+  React.useEffect(() => {
+    if (toastMsg) {
+      const timer = setTimeout(() => setToastMsg(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [toastMsg]);
+
   const startAnalyze = useCallback(async (file: File, calib: CalibrationData) => {
     setIsAnalyzing(true);
     setErrorMsg(null);
@@ -127,18 +177,73 @@ function App() {
   }, []);
 
   const handleImageUpload = async (file: File) => {
-    setImagePreview(URL.createObjectURL(file));
+    const objUrl = URL.createObjectURL(file);
+    setImagePreview(objUrl);
     setParsedItems([]);
     setExchangePlan([]);
     setDebugUrl(null);
 
     // ウィザードか解析か
     if (!calibration) {
-      setWizardStep(1);
-      setCrop({ unit: 'px', x: 0, y: 0, width: 250, height: 100 });
-      setCompletedCrop(null);
+      const img = new Image();
+      img.onload = () => {
+        const device = guessDevice(img.width, img.height);
+        if (device && DEVICE_PRESETS[device]) {
+          setDeviceConfirm({ file, deviceName: device, calibPreset: DEVICE_PRESETS[device] });
+        } else {
+          startWizard();
+        }
+      };
+      img.src = objUrl;
     } else {
       startAnalyze(file, calibration);
+    }
+  };
+
+  const startWizard = () => {
+    setWizardStep(1);
+    setCrop({ unit: 'px', x: 0, y: 0, width: 250, height: 100 });
+    setCompletedCrop(null);
+  };
+
+  const handleConfirmDevice = (confirmed: boolean) => {
+    if (!deviceConfirm) return;
+    if (confirmed) {
+      const calib = deviceConfirm.calibPreset;
+      localStorage.setItem('calibration_data', JSON.stringify(calib));
+      setCalibration(calib);
+      setWizardStep(0);
+      startAnalyze(deviceConfirm.file, calib);
+    } else {
+      setToastMsg("開発者にスクリーンショットをお送りください。手動でクロップ枠を設定します。");
+      startWizard();
+    }
+    setDeviceConfirm(null);
+  };
+
+  const handleExport = () => {
+    if (calibration) {
+      navigator.clipboard.writeText(JSON.stringify(calibration, null, 2))
+        .then(() => setToastMsg("クロップ設定をクリップボードにコピーしました！"))
+        .catch(() => setToastMsg("コピーに失敗しました。"));
+    }
+  };
+
+  const handleImport = () => {
+    try {
+      const parsed = JSON.parse(importText);
+      if (parsed && typeof parsed.startX1 === 'number') {
+        localStorage.setItem('calibration_data', JSON.stringify(parsed));
+        setCalibration(parsed);
+        setShowImportDialog(false);
+        setImportText('');
+        setToastMsg("クロップ設定をインポートしました。");
+        setWizardStep(0);
+      } else {
+        setToastMsg("不正なフォーマットです。");
+      }
+    } catch (e) {
+      setToastMsg("JSONのパースに失敗しました。");
     }
   };
 
@@ -257,9 +362,7 @@ function App() {
     setCalibration(null);
     const selectedFile = (document.getElementById('file-upload') as HTMLInputElement)?.files?.[0];
     if (selectedFile) {
-      setWizardStep(1);
-      setCrop({ unit: 'px', x: 0, y: 0, width: 250, height: 100 });
-      setCompletedCrop(null);
+      startWizard();
     }
   };
 
@@ -294,10 +397,20 @@ function App() {
           <h1><Sparkles className="inline-block mr-2 text-accent-hover" /> Item Balancer</h1>
           <p>画像を読み込んで、アイテムの1:1平準化交換を計算します</p>
           {calibration && !isAnalyzing && wizardStep === 0 && (
-            <button onClick={resetCalibration} className="btn" style={{ marginTop: '8px', fontSize: '0.9em', padding: '6px 12px' }}>
-              <Settings size={16} style={{ display: 'inline', marginRight: '4px' }} />
-              クロップ位置を再設定する
-            </button>
+            <div style={{ marginTop: '12px', display: 'flex', gap: '8px', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button onClick={resetCalibration} className="btn" style={{ fontSize: '0.9em', padding: '6px 12px' }}>
+                <Settings size={16} style={{ display: 'inline', marginRight: '4px' }} />
+                再設定
+              </button>
+              <button onClick={handleExport} className="btn" style={{ fontSize: '0.9em', padding: '6px 12px', background: 'rgba(51, 154, 240, 0.2)', borderColor: '#339af0' }}>
+                <Upload size={16} style={{ display: 'inline', marginRight: '4px' }} />
+                エクスポート
+              </button>
+              <button onClick={() => setShowImportDialog(true)} className="btn" style={{ fontSize: '0.9em', padding: '6px 12px', background: 'rgba(81, 207, 102, 0.2)', borderColor: '#51cf66' }}>
+                <Download size={16} style={{ display: 'inline', marginRight: '4px' }} />
+                インポート
+              </button>
+            </div>
           )}
         </header>
 
@@ -558,6 +671,82 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* 端末確認モーダル */}
+      {deviceConfirm && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.8)', zIndex: 2000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center'
+        }}>
+          <div className="glass-panel" style={{ padding: '24px', maxWidth: '400px', textAlign: 'center' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '16px' }}>端末の確認</h3>
+            <p style={{ marginBottom: '24px' }}>
+              あなたが使用しているのは <strong>{deviceConfirm.deviceName}</strong> ですか？
+            </p>
+            <div style={{ display: 'flex', gap: '16px', justifyContent: 'center' }}>
+              <button className="btn" onClick={() => handleConfirmDevice(false)} style={{ flex: 1, background: 'rgba(255,255,255,0.1)' }}>
+                いいえ
+              </button>
+              <button className="btn" onClick={() => handleConfirmDevice(true)} style={{ flex: 1, background: 'var(--accent-color)', color: '#fff' }}>
+                はい
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* インポートモーダル */}
+      {showImportDialog && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.8)', zIndex: 2000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center'
+        }}>
+          <div className="glass-panel" style={{ padding: '24px', width: '100%', maxWidth: '500px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 style={{ margin: 0 }}>設定のインポート</h3>
+              <button onClick={() => setShowImportDialog(false)} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer' }}>
+                <X size={24} />
+              </button>
+            </div>
+            <p style={{ fontSize: '0.9em', color: 'rgba(255,255,255,0.7)', marginBottom: '12px' }}>
+              エクスポートしたJSONデータを貼り付けてください。
+            </p>
+            <textarea
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              style={{
+                width: '100%', height: '150px', padding: '12px',
+                background: 'rgba(0,0,0,0.3)', color: '#fff',
+                border: '1px solid rgba(255,255,255,0.2)', borderRadius: '8px',
+                fontFamily: 'monospace', resize: 'vertical', marginBottom: '16px'
+              }}
+              placeholder='{"startX1": ...}'
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+              <button className="btn" onClick={() => setShowImportDialog(false)} style={{ background: 'rgba(255,255,255,0.1)' }}>
+                キャンセル
+              </button>
+              <button className="btn" onClick={handleImport} style={{ background: '#51cf66', color: '#111', fontWeight: 'bold' }}>
+                インポート実行
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* トースト通知 */}
+      {toastMsg && (
+        <div style={{
+          position: 'fixed', top: '24px', left: '50%', transform: 'translateX(-50%)',
+          background: 'rgba(30, 30, 40, 0.95)', border: '1px solid var(--accent-color)',
+          padding: '12px 24px', borderRadius: '30px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          zIndex: 3000, color: '#fff', fontWeight: 'bold', animation: 'fadeInDown 0.3s ease-out'
+        }}>
+          {toastMsg}
+        </div>
+      )}
     </div>
   );
 }
