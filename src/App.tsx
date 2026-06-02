@@ -55,6 +55,7 @@ function App() {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [importText, setImportText] = useState('');
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   // ウィザード状態: 0=完了, 1=赤(左上外), 2=黄(左上内), 3=青(右上内), 4=橙(左下外)
   const [calibration, setCalibration] = useState<CalibrationData | null>(() => {
@@ -177,11 +178,29 @@ function App() {
   }, []);
 
   const handleImageUpload = async (file: File) => {
+    if (imagePreview) {
+      URL.revokeObjectURL(imagePreview);
+    }
     const objUrl = URL.createObjectURL(file);
     setImagePreview(objUrl);
+    setIsAnalyzing(false);
+    setProgressMsg('');
     setParsedItems([]);
     setExchangePlan([]);
     setDebugUrl(null);
+    setErrorMsg(null);
+    setTempPoints({});
+    setDeviceConfirm(null);
+    setToastMsg(null);
+    setShowImportDialog(false);
+    setImportText('');
+    setCompletedCrop(null);
+    setCrop({ unit: 'px', x: 0, y: 0, width: 250, height: 100 });
+
+    if (containerRef.current) {
+      containerRef.current.scrollTo(0, 0);
+    }
+    isPanning.current = false;
 
     // ウィザードか解析か
     if (!calibration) {
@@ -204,6 +223,7 @@ function App() {
     setWizardStep(1);
     setCrop({ unit: 'px', x: 0, y: 0, width: 250, height: 100 });
     setCompletedCrop(null);
+    setTempPoints({});
   };
 
   const handleConfirmDevice = (confirmed: boolean) => {
@@ -360,10 +380,30 @@ function App() {
   const resetCalibration = () => {
     localStorage.removeItem('calibration_data');
     setCalibration(null);
-    const selectedFile = (document.getElementById('file-upload') as HTMLInputElement)?.files?.[0];
-    if (selectedFile) {
-      startWizard();
+    setTempPoints({});
+    setErrorMsg(null);
+    setDeviceConfirm(null);
+    setToastMsg(null);
+    setShowImportDialog(false);
+    setShowResetConfirm(false);
+    setIsAnalyzing(false);
+    setProgressMsg('');
+    setCompletedCrop(null);
+    setCrop({ unit: 'px', x: 0, y: 0, width: 250, height: 100 });
+
+    if (imagePreview) {
+      URL.revokeObjectURL(imagePreview);
     }
+    setImagePreview(null);
+    setParsedItems([]);
+    setExchangePlan([]);
+    setDebugUrl(null);
+    setWizardStep(0);
+
+    if (containerRef.current) {
+      containerRef.current.scrollTo(0, 0);
+    }
+    isPanning.current = false;
   };
 
   const handleItemCountChange = (index: number, newCount: number) => {
@@ -398,7 +438,7 @@ function App() {
           <p>画像を読み込んで、アイテムの1:1平準化交換を計算します</p>
           {calibration && !isAnalyzing && wizardStep === 0 && (
             <div style={{ marginTop: '12px', display: 'flex', gap: '8px', justifyContent: 'center', flexWrap: 'wrap' }}>
-              <button onClick={resetCalibration} className="btn" style={{ fontSize: '0.9em', padding: '6px 12px' }}>
+              <button onClick={() => setShowResetConfirm(true)} className="btn" style={{ fontSize: '0.9em', padding: '6px 12px' }}>
                 <Settings size={16} style={{ display: 'inline', marginRight: '4px' }} />
                 再設定
               </button>
@@ -422,7 +462,10 @@ function App() {
             className="hidden"
             style={{ display: 'none' }}
             onChange={(e) => {
-              if (e.target.files) handleImageUpload(e.target.files[0]);
+              if (e.target.files && e.target.files.length > 0) {
+                handleImageUpload(e.target.files[0]);
+                e.target.value = '';
+              }
             }}
           />
 
@@ -730,6 +773,31 @@ function App() {
               </button>
               <button className="btn" onClick={handleImport} style={{ background: '#51cf66', color: '#111', fontWeight: 'bold' }}>
                 インポート実行
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 再設定確認モーダル */}
+      {showResetConfirm && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.8)', zIndex: 2000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center'
+        }}>
+          <div className="glass-panel" style={{ padding: '24px', maxWidth: '400px', textAlign: 'center' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '16px', color: 'var(--danger-color)' }}>再設定の確認</h3>
+            <p style={{ marginBottom: '24px', lineHeight: '1.5' }}>
+              クロップ位置の再設定を行います。<br/>
+              <strong>現在アップロードされている画像は消去されますがよろしいですか？</strong>
+            </p>
+            <div style={{ display: 'flex', gap: '16px', justifyContent: 'center' }}>
+              <button className="btn" onClick={() => setShowResetConfirm(false)} style={{ flex: 1, background: 'rgba(255,255,255,0.1)' }}>
+                キャンセル
+              </button>
+              <button className="btn" onClick={resetCalibration} style={{ flex: 1, background: 'var(--danger-color)', color: '#fff' }}>
+                再設定する
               </button>
             </div>
           </div>
