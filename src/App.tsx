@@ -158,6 +158,33 @@ function App() {
     }
   }, [toastMsg]);
 
+  // ペーストイベントから最新の handleImageUpload を呼ぶための ref
+  const handleImageUploadRef = useRef<((file: File) => void) | null>(null);
+
+  React.useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith('image/')) {
+          const file = items[i].getAsFile();
+          if (file) {
+            e.preventDefault();
+            handleImageUploadRef.current?.(file);
+            break;
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, []);
+
   const startAnalyze = useCallback(async (file: File, calib: CalibrationData) => {
     setIsAnalyzing(true);
     setErrorMsg(null);
@@ -218,6 +245,8 @@ function App() {
       startAnalyze(file, calibration);
     }
   };
+
+  handleImageUploadRef.current = handleImageUpload;
 
   const startWizard = () => {
     setWizardStep(1);
@@ -478,9 +507,9 @@ function App() {
               onClick={() => document.getElementById('file-upload')?.click()}
             >
               <UploadCloud size={48} style={{ margin: '0 auto 16px', color: 'var(--accent-color)' }} />
-              <h3>クリックまたはドラッグ＆ドロップで画像をアップロード</h3>
+              <h3>クリック、ペースト、またはドラッグ＆ドロップで画像をアップロード</h3>
               <p style={{ color: 'rgba(255,255,255,0.6)', marginTop: '8px' }}>
-                画面全体のスクリーンショットに対応しています
+                画面全体のスクリーンショットに対応しています（Ctrl+Vで直接貼り付け可能）
               </p>
             </div>
           ) : wizardStep > 0 ? (
