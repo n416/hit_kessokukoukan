@@ -114,28 +114,7 @@ export async function analyzeImageAuto(
   onProgress?.('画像全体を解析中...');
   const [result] = await ocr.predict(processedBlob);
 
-  ctx.lineWidth = 2;
-  ctx.font = '20px Arial';
-
-  // すべての検出領域をデバッグキャンバスに描画
-  for (const item of (result?.items || [])) {
-    // 枠を赤で描画
-    ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-    ctx.beginPath();
-    ctx.moveTo(item.poly[0][0], item.poly[0][1]);
-    ctx.lineTo(item.poly[1][0], item.poly[1][1]);
-    ctx.lineTo(item.poly[2][0], item.poly[2][1]);
-    ctx.lineTo(item.poly[3][0], item.poly[3][1]);
-    ctx.closePath();
-    ctx.stroke();
-
-    // テキストを黄色の文字で描画（背景を半透明の黒にして見やすく）
-    const textW = ctx.measureText(item.text).width;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.fillRect(item.poly[0][0], item.poly[0][1] - 22, textW + 4, 24);
-    ctx.fillStyle = '#ffff00';
-    ctx.fillText(item.text, item.poly[0][0] + 2, item.poly[0][1] - 4);
-  }
+  // 描画処理は抽出完了後に移動
 
   const parsedItems: ParsedItem[] = EXPECTED_ITEMS.map(name => ({ name, count: 0 }));
 
@@ -151,6 +130,8 @@ export async function analyzeImageAuto(
       h: Math.max(...ys) - Math.min(...ys),
     };
   });
+
+  const usedBlocks = new Set<typeof itemsWithCenter[0]>();
 
   // ========== 新しい数理計算的アプローチ（地点ベース） ==========
   
@@ -226,6 +207,7 @@ export async function analyzeImageAuto(
 
       for (let i = 0; i < 8; i++) {
         const columnBlocks = grid[i]; // 同じ地点にあるブロックの配列
+        columnBlocks.forEach(b => usedBlocks.add(b));
         let count = -1;
 
         // カラム内のすべてのテキストを結合して数字を探す
@@ -284,6 +266,7 @@ export async function analyzeImageAuto(
       const labelItem = itemsWithCenter.find(it => keywords.some(kw => it.text.includes(kw)));
       
       if (labelItem) {
+        usedBlocks.add(labelItem);
         let count = -1;
 
         // まず、ラベルテキスト自身の中に数字（例: "28/1"）が埋め込まれていないかチェック
@@ -301,6 +284,7 @@ export async function analyzeImageAuto(
 
           if (candidateNumbers.length > 0) {
             count = candidateNumbers[0].count;
+            usedBlocks.add(candidateNumbers[0]);
           }
         }
 
@@ -310,6 +294,27 @@ export async function analyzeImageAuto(
         }
       }
     }
+  }
+
+  // ========== 特定した枠だけを描画 ==========
+  ctx.lineWidth = 3;
+  ctx.font = '20px Arial';
+
+  for (const item of Array.from(usedBlocks)) {
+    ctx.strokeStyle = 'rgba(255, 0, 0, 1.0)';
+    ctx.beginPath();
+    ctx.moveTo(item.poly[0][0], item.poly[0][1]);
+    ctx.lineTo(item.poly[1][0], item.poly[1][1]);
+    ctx.lineTo(item.poly[2][0], item.poly[2][1]);
+    ctx.lineTo(item.poly[3][0], item.poly[3][1]);
+    ctx.closePath();
+    ctx.stroke();
+
+    const textW = ctx.measureText(item.text).width;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(item.poly[0][0], item.poly[0][1] - 22, textW + 4, 24);
+    ctx.fillStyle = '#ffff00';
+    ctx.fillText(item.text, item.poly[0][0] + 2, item.poly[0][1] - 4);
   }
 
   await ocr.dispose();
