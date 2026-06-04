@@ -152,84 +152,163 @@ export async function analyzeImageAuto(
     };
   });
 
-  // 個数らしいテキスト（数字と/）を持つ要素を抽出
-  const numberItems = itemsWithCenter.filter(item => {
-    const t = item.text.replace(/\s/g, '');
-    // 最低限数字が含まれていること
-    return /\d/.test(t) && !/[あ-んア-ンa-zA-Z]/.test(t.replace(/[lI]/g, '')); // lやIは1の誤認識として許容
-  }).map(item => {
-    let count = 0;
-    const t = item.text.replace(/\s/g, '');
-    const match = t.match(/(\d+)[\/\]]*[1IlI]?$/);
-    if (match) {
-      count = parseInt(match[1], 10);
-    } else {
-      const fallback = t.match(/(\d+)/);
-      if (fallback) {
-        count = parseInt(fallback[1], 10);
+  // ========== 新しい数理計算的アプローチ（地点ベース） ==========
+  
+  // 1. アイテム候補地を探す
+  // 「色」「帰属」「/1」「キュ」などのキーワードを少しでも含むブロックを抽出
+  // これにより、画面上部のダイヤや下部のポイントなどの無関係な数字を排除する
+  const candidateBlocks = itemsWithCenter.filter(item => 
+    /色|帰属|\/1|キュ/.test(item.text)
+  );
+
+  let isGridBasedSuccess = false;
+
+  if (candidateBlocks.length > 0) {
+    console.log(`[Grid] 候補ブロックを ${candidateBlocks.length} 個検出しました。`);
+    
+    // 2. Y座標でクラスタリングして行（Row）を特定する
+    const sortedByY = [...candidateBlocks].sort((a, b) => a.cy - b.cy);
+    
+    let maxGap = 0;
+    let splitIdx = Math.floor(sortedByY.length / 2); // デフォルトは半分
+    // 行間のギャップを探す
+    for (let i = 1; i < sortedByY.length; i++) {
+      const gap = sortedByY[i].cy - sortedByY[i-1].cy;
+      // 候補数が多い場合、少なくとも各行に数個（たとえば3〜4個）はあると想定
+      if (gap > maxGap && i >= 3 && sortedByY.length - i >= 3) {
+        maxGap = gap;
+        splitIdx = i;
       }
     }
-    return { ...item, count, cleanText: t };
-  });
 
-  // 1. キーワードベースでの紐付けを試みる
-  let foundByKeyword = 0;
-  for (let i = 0; i < EXPECTED_ITEMS.length; i++) {
-    const keywords = ITEM_KEYWORDS[i];
-    const labelItem = itemsWithCenter.find(it => keywords.some(kw => it.text.includes(kw)));
-    
-    if (labelItem) {
-      // ラベルの「すぐ下」にある数字を探す
-      // X座標が近く（ラベルの幅の半分以内）、Y座標がラベルより大きいもの
-      const candidateNumbers = numberItems.filter(num => 
-        num.cy > labelItem.cy && 
-        Math.abs(num.cx - labelItem.cx) < labelItem.w
-      ).sort((a, b) => a.cy - b.cy); // 最もYが近いもの
+    const topRowBlocks = sortedByY.slice(0, splitIdx);
+    const bottomRowBlocks = sortedByY.slice(splitIdx);
 
-      if (candidateNumbers.length > 0) {
-        parsedItems[i].count = candidateNumbers[0].count;
-        foundByKeyword++;
-        console.log(`[Keyword] ${EXPECTED_ITEMS[i]} -> ${candidateNumbers[0].count} (text: ${candidateNumbers[0].cleanText})`);
+    // 3. 各行をX座標でクラスタリングして列（Column）を特定する
+    topRowBlocks.sort((a, b) => a.cx - b.cx);
+    bottomRowBlocks.sort((a, b) => a.cx - b.cx);
+
+    const groupToColumns = (blocks: typeof itemsWithCenter) => {
+      const columns: (typeof itemsWithCenter)[] = [];
+      if (blocks.length === 0) return columns;
+      
+      let currentColumn = [blocks[0]];
+      for (let i = 1; i < blocks.length; i++) {
+        // X座標が近ければ（150px以内）同じカラムとみなす
+        if (Math.abs(blocks[i].cx - currentColumn[0].cx) < 150) {
+          currentColumn.push(blocks[i]);
+        } else {
+          columns.push(currentColumn);
+          currentColumn = [blocks[i]];
+        }
       }
+      columns.push(currentColumn);
+      return columns;
+    };
+
+    const topColumns = groupToColumns(topRowBlocks);
+    const bottomColumns = groupToColumns(bottomRowBlocks);
+
+    console.log(`[Grid] クラスタリング結果: 上段 ${topColumns.length} 列, 下段 ${bottomColumns.length} 列`);
+
+    // 4. 8箇所の地点（top: 4, bottom: 4）が確定したら、それぞれの地点から数字を抜き出す
+    if (topColumns.length >= 4 && bottomColumns.length >= 4) {
+      console.log("[Grid] 8箇所のグリッド（地点）の特定に成功しました。数値を抽出します。");
+      
+      // 左から4つずつ取得（もし余分なノイズ列があれば捨てる）
+      const grid = [
+        ...topColumns.slice(0, 4),    // 0:赤, 1:黄, 2:青, 3:銀
+        ...bottomColumns.slice(0, 4)  // 4:橙, 5:緑, 6:紫, 7:虹
+      ];
+      
+      // 画面の配置仕様（左から 赤・黄・青・銀 / 橙・緑・紫・虹）
+      const mapGridToIndex = [0, 2, 4, 6, 1, 3, 5, 7];
+
+      for (let i = 0; i < 8; i++) {
+        const columnBlocks = grid[i]; // 同じ地点にあるブロックの配列
+        let count = -1;
+
+        // カラム内のすべてのテキストを結合して数字を探す
+        const combinedText = columnBlocks.map(b => b.text).join('');
+        // 「数字 + /1」のパターンを探す
+        const match = combinedText.replace(/\s/g, '').match(/(\d+)[\/\]]+[1IlI]/);
+        
+        if (match) {
+          count = parseInt(match[1], 10);
+        } else {
+          // もし /1 が見つからなかったら、純粋な数字らしき文字列を探す
+          const fallbackMatch = combinedText.replace(/\s/g, '').match(/(\d+)/);
+          if (fallbackMatch) {
+            count = parseInt(fallbackMatch[1], 10);
+          }
+        }
+
+        if (count !== -1) {
+          const targetIndex = mapGridToIndex[i];
+          parsedItems[targetIndex].count = count;
+          console.log(`[Grid] 地点 ${i} -> ${EXPECTED_ITEMS[targetIndex]}: ${count} (source text: ${combinedText})`);
+        } else {
+          console.log(`[Grid] 地点 ${i} から数値を抽出できませんでした (source text: ${combinedText})`);
+        }
+      }
+      isGridBasedSuccess = true;
+    } else {
+      console.log("[Grid] 8箇所の特定に失敗しました（列数が足りません）。フォールバックが必要です。");
     }
   }
 
-  // もしキーワードで全然見つからなかった場合（PaddleOCR(en)で日本語が読めなかった場合など）、座標ベースの推測を行う
-  if (foundByKeyword < 4 && numberItems.length >= 8) {
-    console.log(`[Fallback] 座標ベースの推測に切り替えます。`);
-    // 画面内の数字をY座標でソート
-    const sortedByY = [...numberItems].sort((a, b) => a.cy - b.cy);
+  // 5. グリッドの特定に失敗した場合のフォールバック（旧キーワード方式の強化版）
+  if (!isGridBasedSuccess) {
+    console.log(`[KeywordFallback] グリッドベースでの割り当てができないため、キーワードベースの推測に切り替えます。`);
     
-    // Y座標のギャップが大きいところで上段と下段に分ける
-    let maxGap = 0;
-    let splitIndex = 4; // デフォルトは4個/4個
-    for (let i = 1; i < sortedByY.length; i++) {
-      const gap = sortedByY[i].cy - sortedByY[i-1].cy;
-      if (gap > maxGap && i >= 4 && sortedByY.length - i >= 4) {
-        maxGap = gap;
-        splitIndex = i;
+    const numberItems = itemsWithCenter.filter(item => {
+      const t = item.text.replace(/\s/g, '');
+      return /\d/.test(t) && !/[あ-んア-ンa-zA-Z]/.test(t.replace(/[lI]/g, ''));
+    }).map(item => {
+      let count = 0;
+      const t = item.text.replace(/\s/g, '');
+      const match = t.match(/(\d+)[\/\]]*[1IlI]?$/);
+      if (match) {
+        count = parseInt(match[1], 10);
+      } else {
+        const fallback = t.match(/(\d+)/);
+        if (fallback) {
+          count = parseInt(fallback[1], 10);
+        }
       }
-    }
+      return { ...item, count, cleanText: t };
+    });
 
-    const topRow = sortedByY.slice(0, splitIndex).sort((a, b) => a.cx - b.cx).slice(0, 4); // 上段をXでソート
-    const bottomRow = sortedByY.slice(splitIndex).sort((a, b) => a.cx - b.cx).slice(0, 4); // 下段をXでソート
-
-    // 画面の配置仕様（左から 赤・黄・青・銀 / 橙・緑・紫・虹）
-    // targetIndex: 
-    // 上段: 0(赤), 2(黄), 4(青), 6(銀)
-    // 下段: 1(橙), 3(緑), 5(紫), 7(虹)
-    if (topRow.length === 4 && bottomRow.length === 4) {
-      parsedItems[0].count = topRow[0].count;
-      parsedItems[2].count = topRow[1].count;
-      parsedItems[4].count = topRow[2].count;
-      parsedItems[6].count = topRow[3].count;
-
-      parsedItems[1].count = bottomRow[0].count;
-      parsedItems[3].count = bottomRow[1].count;
-      parsedItems[5].count = bottomRow[2].count;
-      parsedItems[7].count = bottomRow[3].count;
+    for (let i = 0; i < EXPECTED_ITEMS.length; i++) {
+      const keywords = ITEM_KEYWORDS[i];
+      const labelItem = itemsWithCenter.find(it => keywords.some(kw => it.text.includes(kw)));
       
-      console.log(`[Fallback] 座標ベースの割り当てが完了しました。`);
+      if (labelItem) {
+        let count = -1;
+
+        // まず、ラベルテキスト自身の中に数字（例: "28/1"）が埋め込まれていないかチェック
+        const textNoSpace = labelItem.text.replace(/\s/g, '');
+        const selfMatch = textNoSpace.match(/(\d+)[\/\]]+[1IlI]/);
+        if (selfMatch) {
+          count = parseInt(selfMatch[1], 10);
+        }
+
+        if (count === -1) {
+          const candidateNumbers = numberItems.filter(num => 
+            num.cy > labelItem.cy - 10 && 
+            Math.abs(num.cx - labelItem.cx) < labelItem.w
+          ).sort((a, b) => a.cy - b.cy);
+
+          if (candidateNumbers.length > 0) {
+            count = candidateNumbers[0].count;
+          }
+        }
+
+        if (count !== -1) {
+          parsedItems[i].count = count;
+          console.log(`[KeywordFallback] ${EXPECTED_ITEMS[i]} -> ${count} (text: ${labelItem.text})`);
+        }
+      }
     }
   }
 
